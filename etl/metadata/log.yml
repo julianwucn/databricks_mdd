@@ -8,7 +8,7 @@ disable_existing_loggers: False
 
 formatters:
     formatter_1:
-        format: '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)-25s | %(message)s'
+        format: '%(asctime)s.%(msecs)03d | %(levelname)-10s | %(name)-20s | %(message)s'
         datefmt: '%Y-%m-%d %H:%M:%S'
     formatter_2:
         format: '%(asctime)s.%(msecs)03d; %(levelname)s; %(name)s; %(message)s'
@@ -34,7 +34,7 @@ formatters:
 handlers:
     console:
         class: logging.StreamHandler
-        level: INFO
+        level: DEBUG
         formatter: formatter_1
         stream: ext://sys.stdout
 
@@ -42,7 +42,7 @@ handlers:
         class: logging.FileHandler
         level: DEBUG
         formatter: formatter_2
-        filename: /lakehouse/default/Files/log/<log_folder>/<log_year>/<log_month>/<log_folder>_<log_timestamp>/<file_name>.csv
+        filename: /lakehouse/default/Files/log/<log_folder>/<log_year>/<log_month>/<log_day>/<file_name>_<log_timestamp>.csv
         mode: a
 
     smtp_tls_gmail: 
@@ -70,7 +70,7 @@ handlers:
 loggers:
     mdd:
         level: DEBUG
-        handlers: [file, console]
+        handlers: [file, console, smtp_tls_gmail]
         propagate: no
  
 root:
