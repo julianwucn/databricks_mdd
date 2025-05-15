@@ -1,0 +1,17 @@
+id: environment
+type: environment
+version: 1.0.0
+author: Julian Wu
+comment: dev environment 
+
+source:
+    source_lakehouse: lakehouse
+    source_lakehouse_guid: 0159bee8-eee3-410a-8043-f5b0275e6490
+    source_data_root_path: Files/data/
+
+destination:
+    destination_lakehouse: lakehouse
+    destination_lakehouse_guid: 0159bee8-eee3-410a-8043-f5b0275e6490
+    destination_bronze_schema: bronze
+    destination_silver_schema: silver
+    destination_gold_schema: gold

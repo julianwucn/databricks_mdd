@@ -1,0 +1,78 @@
+id: log_dev
+type: log
+version: 1 #do not change this value
+author: julian wu
+comment: logger
+
+disable_existing_loggers: False
+
+formatters:
+    formatter_1:
+        format: '%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)-25s | %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
+    formatter_2:
+        format: '%(asctime)s.%(msecs)03d; %(levelname)s; %(name)s; %(message)s'
+        datefmt: '%Y-%m-%d %H:%M:%S'
+    brief: 
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        format: '%(asctime)s | %(levelname)-8s | %(name)-15s | %(message)s'
+    standard: 
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        format: '%(levelname)-8s; %(asctime)s; %(name)-15s; %(funcName)s;%(lineno)d: %(message)s'
+    multi-process: 
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        format: '%(levelname)-8s; [%(process)d]; %(name)-15s; %(module)s:%(funcName)s;%(lineno)d: %(message)s'
+    multi-thread: 
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        format: '%(levelname)-8s; %(threadName)s; %(name)-15s; %(module)s:%(funcName)s;%(lineno)d: %(message)s'
+    verbose: 
+        datefmt: '%Y-%m-%d %H:%M:%S'
+        format: '%(levelname)-8s; [%(process)d]; %(threadName)s; %(name)-15s; %(module)s:%(funcName)s;%(lineno)d: %(message)s'
+    multiline: 
+        format: 'Level: %(levelname)s\nTime: %(asctime)s\nProcess: %(process)d\nThread: %(threadName)s\nLogger: %(name)s\nPath: %(module)s:%(lineno)d\nFunction :%(funcName)s\nMessage: %(message)s\n'
+    
+handlers:
+    console:
+        class: logging.StreamHandler
+        level: INFO
+        formatter: formatter_1
+        stream: ext://sys.stdout
+
+    file:
+        class: logging.FileHandler
+        level: DEBUG
+        formatter: formatter_2
+        filename: /lakehouse/default/Files/log/<log_folder>/<log_year>/<log_month>/<log_folder>_<log_timestamp>/<file_name>.csv
+        mode: a
+
+    smtp_tls_gmail: 
+        class: env.mdd.logger.TlsSMTPHandler
+        level: ERROR
+        formatter: formatter_2
+        mailhost: [smtp.gmail.com, 587]
+        fromaddr: julian.wu.cn@gmail.com
+        toaddrs: 
+            - wuj@bostonpizza.com
+        subject: MDD Error
+        credentials: [julian.wu.cn@gmail.com, cxyqlpudnjdkrztx]
+
+    smtp_tls_office365: 
+        class: env.mdd.logger.TlsSMTPHandler
+        level: ERROR
+        formatter: formatter_2
+        mailhost: [smtp.office365.com, 587]
+        fromaddr: wuj@bostonpizza.com
+        toaddrs: 
+            - wuj@bostonpizza.com
+        subject: MDD Error
+        credentials: [wuj@bostonpizza.com, YourPassword]
+
+loggers:
+    mdd:
+        level: DEBUG
+        handlers: [file, console]
+        propagate: no
+ 
+root:
+    level: INFO
+    handlers: [console]
