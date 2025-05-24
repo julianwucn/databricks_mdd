@@ -1,0 +1,63 @@
+version: 1.0.0
+modified_date: 5/16/2025
+author: Julian Wu
+comment: mdd test
+
+dataflow_type: onboard
+debug: true
+active: true
+
+reader:
+    source_format: cloudFiles
+    source_relative_path: paytronix/
+    source_options:
+        cloudFiles.format: csv
+        cloudFiles.schemaLocation: loc1 # use different number for mutliple sources
+        cloudFiles.maxFilesPerTrigger: 1000
+        cloudFiles.includeExistingFiles: true
+        cloudFiles.schemaEvolutionMode: rescue
+        pathGlobFilter: MID352_CombinedCards_*.csv
+        skipRows: 2
+        header: false
+        recursiveFileLookup: true
+        ignoreLeadingWhiteSpace: true
+        ignoreTrailingWhiteSpace: true
+        modifiedAfter: 1900-01-01T00:00:00
+        mode: PERMISSIVE # PERMISSIVE, DROPMALFORMED, FAILFAST
+        columnNameOfCorruptRecord: _corrupt_record
+        rescuedDataColumn: _rescued_data
+    source_schema: "
+        combine_datetime timestamp
+        ,primary_card_number string
+        ,added_card_number string
+        ,card_template string
+        ,current_account_status string
+        ,no_cards_in_account int
+        ,email string
+        ,surviving_account_number string
+        ,abandoned_account_number string
+        ,account_code string
+        "
+        
+writer:
+    sink_name: bronze.paytronix_mid352_combinedcards
+    sink_projected_script: select * from vw_temp_source_data_uuid
+    sink_write_mode: append #append, update (complete is not supported)
+    sink_primarykey: combine_datetime, primary_card_number, added_card_number # mandatory for update mode
+    sink_watermark_column: file_date
+    sink_update_changes_only: true
+    sink_write_options:
+        mergeSchema: false
+        checkpointLocation: loc1 # use different number for mutliple sources
+    sink_write_trigger: availableNow # availableNow, once, processingTime
+    sink_write_trigger_value: true # for processingTime only, always true if the trigger is availableNow or once
+    sink_write_prescript: null
+    sink_write_postscript: null
+    sink_validators:
+      - expectation: pk_columns_no_nulls
+        expectation_type: column #column, dataset, table
+        expectation_rule: 
+        expectation_rule_type: sql # sql, ge
+        expectation_violation_action: warn #warn, drop, fail
+        expectation_violation_action_script: null
+        active: false 

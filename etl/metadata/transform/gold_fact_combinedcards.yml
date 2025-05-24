@@ -1,0 +1,47 @@
+version: 1.0.0
+modified_date: 5/16/2025
+author: Julian Wu
+comment: mdd test
+
+dataflow_type: transform
+debug: true
+active: true
+
+reader:
+    source_name: bronze.paytronix_mid352_combinedcards
+    source_primarykey: combine_datetime, primary_card_number, added_card_number # mandatory for deduplication of CDF data
+    source_deduplication_columns: _commit_timestamp desc, account_code
+ 
+writer:
+    sink_name: gold.fact_combinedcards
+    sink_projected_script: select * from vw_temp_source_data_uuid
+    sink_write_mode: append #append, update (complete is not supported)
+    sink_primarykey: combine_datetime, primary_card_number, added_card_number # mandatory for update mode
+    sink_watermark_column: _source_timestamp
+    sink_update_changes_only: true
+    sink_write_options:
+        mergeSchema: false
+        checkpointLocation: loc1 # use different number for mutliple sources
+    sink_write_trigger: availableNow # availableNow, once, processingTime
+    sink_write_trigger_value: true # for processingTime only, always true if the trigger is availableNow or once
+    sink_write_prescript: null
+    sink_write_postscript: null
+    sink_validators:
+      - expectation: pk_columns_no_nulls
+        expectation_type: column #column, dataset, table
+        expectation_rule: 
+        expectation_rule_type: sql # sql, ge
+        expectation_violation_action: warn #warn, drop, fail
+        expectation_violation_action_script: null
+        active: false 
+
+sync_options:
+    mode: incremental # incremental, backfill, full
+    backfill_days: 7 # used by backfill or fallback to backfill from incremental
+
+transformers:
+    - transformer: transformer_1
+      transformer_type: sql
+      transformer_script: transformer.sql
+      transformer_secondary_tables:
+      active: true

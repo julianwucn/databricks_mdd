@@ -1,0 +1,188 @@
+import re
+from functools import reduce
+from pyspark.sql import SparkSession, DataFrame
+from pyspark.sql.types import StringType, TimestampType
+from pyspark.sql.functions import create_map, col, lit, expr
+from delta.tables import DeltaTable
+from itertools import chain
+
+from mdd.environment import Environment
+
+class DeltaTableUtils:
+    @staticmethod
+    def qualify_table_name(table_name: str) -> str:
+        """
+        Ensures the table_name includes the lakehouse name. Adds Environment.catalog_default if missing.
+
+        Args:
+            table_name (str): Input table name, possibly partially qualified.
+
+        Returns:
+            str: Fully qualified table name.
+        """
+        parts = table_name.split(".")
+
+        if len(parts) == 3:
+            # Already fully qualified: lakehouse.schema.table
+            return table_name
+        elif len(parts) == 2:
+            # Missing lakehouse: add default
+            return f"{Environment.catalog_default}.{table_name}"
+        elif len(parts) == 1:
+            # Only table name provided: assume default schema "default"
+            return f"{Environment.catalog_default}.default.{table_name}"
+        else:
+            raise ValueError(f"Invalid table name format: {table_name}")
+
+    @staticmethod
+    def get_max_column_value(
+        spark: SparkSession,
+        table_name: str,
+        target_column: str,
+        filters: str = None  # e.g., "region = 'US' AND status = 'active'"
+    ):
+        """
+        Returns the maximum value of a column from a Delta table, optionally filtered by an expression.
+
+        :param spark: SparkSession object
+        :param table_name: Full Delta table name (e.g., 'my_db.my_table')
+        :param target_column: Column to compute max value for
+        :param filters: Optional SQL expression string for filtering rows
+        :return: The maximum value of the column, or None if the table is empty or no matches
+        :raises ValueError: If the target_column does not exist in the table
+        """
+        try:
+            table_full_name = DeltaTableUtils.qualify_table_name(table_name)
+            df = spark.read.format("delta").table(table_full_name)
+
+            if target_column not in df.columns:
+                msg = f"Column '{target_column}' not found in table '{table_full_name}'."
+                raise ValueError(msg)
+
+            if filters:
+                df = df.filter(expr(filters))
+
+            result = df.selectExpr(f"max({target_column}) as max_val").collect()
+            return result[0]["max_val"] if result else None
+
+        except Exception as e:
+            raise
+
+    @staticmethod
+    def safe_drop_columns(df, cols_to_drop):
+        existing_cols = [col for col in cols_to_drop if col in df.columns]
+        return df.drop(*existing_cols)
+
+    @staticmethod
+    def combine_columns_as_dict(df: DataFrame, columns: list[str], new_col_name: str = "combined") -> DataFrame:
+        """
+        Combine specified columns into a dictionary column where keys are column names and values are row values.
+
+        :param df: Input Spark DataFrame
+        :param columns: List of column names to include in the dictionary
+        :param new_col_name: Name of the resulting dictionary column (default is 'combined')
+        :return: DataFrame with an added MapType column
+        """
+        kv_pairs = list(chain.from_iterable((lit(c), col(c)) for c in columns))
+        return df.withColumn(new_col_name, create_map(*kv_pairs))
+
+    @staticmethod
+    def ensure_system_columns(
+        spark: SparkSession,
+        table_name: str,
+        corrupt_column: str = None,
+        rescued_column: str = None,
+        debug: bool = False
+    ):
+        """
+        Ensures that the specified Delta table has the required system columns.
+
+        Args:
+            spark (SparkSession): Spark session object.
+            table_name (str): Qualified Delta table name (e.g. 'schema.table').
+            corrupt_column (str): Name of the corrupt record column. Defaults to '_corrupt_record'.
+            rescued_column (str): Name of the rescued data column. Defaults to '_rescued_data'.
+            debug (bool): If True prints debug messages.
+
+        Returns:
+            bool: True if the table has the required system columns, False otherwise.
+        """
+
+        # ensure table existence
+        table_full_name = DeltaTableUtils.qualify_table_name(table_name)
+        try:
+            spark.sql(f"DESCRIBE TABLE {table_full_name}")
+        except Exception as e:
+           raise ValueError(f"Table '{table_full_name}' does not exist.")
+       
+        # Define required system columns and their data types
+        if corrupt_column is None:
+            corrupt_column = "_corrupt_record"
+        if rescued_column is None:
+            rescued_column = "_rescued_data"
+       
+        required_columns = {
+            corrupt_column: StringType(),
+            rescued_column: StringType(),
+            "_source_name": StringType(),
+            "_source_timestamp": TimestampType(),
+            "_record_id": StringType(),
+            "_record_timestamp": TimestampType()
+        }
+
+        # Get current table schema
+        existing_columns = {field.name for field in spark.table(table_full_name).schema.fields}
+
+        # Identify missing columns
+        missing_columns = {
+            col: dtype for col, dtype in required_columns.items() if col not in existing_columns
+        }
+
+        if missing_columns:
+            try:
+                # Add missing columns via SQL
+                for col, dtype in missing_columns.items():
+                    ddl = f"ALTER TABLE {table_full_name} ADD COLUMNS ({col} {dtype.simpleString()})"
+                    spark.sql(ddl)
+            except Exception as e:
+                raise Exception(f"Error adding missing columns to table '{table_full_name}': {e}")
+        
+        print("end")
+
+    @staticmethod
+    def get_join_condition(alias_df: str, alias_table: str, primary_keys: str) -> str:
+        """
+        Constructs a join condition string between two aliases using primary key columns.
+        Accepts primary keys as a comma-separated string and splits it internally.
+
+        :param alias_df: Alias of the DataFrame
+        :param alias_table: Alias of the table
+        :param primary_keys: Comma-separated primary key column names string
+        :return: Join condition string
+        """
+        # Split primary_keys string into list, trimming whitespace
+        keys_list = [k.strip() for k in primary_keys.split(",")]
+
+        conditions = [f"{alias_df}.{k} = {alias_table}.{k}" for k in keys_list]
+        return reduce(lambda x, y: f"{x} and {y}", conditions)
+
+    @staticmethod
+    def get_generated_columns(spark, table_name: str) -> list:
+        """
+        Extracts a list of generated columns from the given Delta table.
+
+        :param spark: SparkSession object
+        :param table_name: QualifiedName of the Delta table
+        :return: List of column names that are generated always as
+        """
+        table_full_name = DeltaTableUtils.qualify_table_name(table_name)
+        ddl = spark.sql(f"SHOW CREATE TABLE {table_full_name}").collect()[0][0]
+        gen_col_pattern = re.compile(r"generated\s+always\s+as", re.IGNORECASE)
+        generated_columns = []
+
+        for line in ddl.splitlines():
+            if gen_col_pattern.search(line):
+                col_name = line.strip().split()[0].strip("`")
+                generated_columns.append(col_name)
+
+        return generated_columns
