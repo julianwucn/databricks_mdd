@@ -8,7 +8,7 @@ import importlib
 from pathlib import Path
 
 from mdd.environment import Environment
-from mdd.helper.function import FunctionUtils as utils
+from mdd.utils import FunctionUtil
 
 
 class Logger:
@@ -39,7 +39,7 @@ class Logger:
         # replace the log file path with the log folder and log file name
         # filename: <log_root_path>/<log_folder>/<log_year>/<log_month>/<log_day>/<log_folder>_<log_timestamp>/<file_name>.csv
         log_root_path = Environment.root_path_log
-        log_timestamp_str = utils.timestamp_to_string(log_timestamp)
+        log_timestamp_str = FunctionUtil.timestamp_to_string(log_timestamp)
         log_year = log_timestamp_str[:4]
         log_month = log_timestamp_str[5:7]
         log_day = log_timestamp_str[8:10]

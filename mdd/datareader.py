@@ -10,13 +10,13 @@ from delta.tables import DeltaTable
 from pyspark.sql.functions import row_number, col, to_date, current_timestamp, expr
 from pyspark.sql.window import Window
 
-from mdd.helper.decorator import DecoratorUtils
-from mdd.helper.deltatable import DeltaTableUtils
+from mdd.utils import DecoratorUtil, DeltaTableUtil
 from mdd.environment import Environment
 
 
-@DecoratorUtils.add_logger()
+@DecoratorUtil.add_logger()
 class AutoLoaderReader:
+    logger: logging.Logger
     def __init__(
         self,
         spark: SparkSession,
@@ -35,9 +35,7 @@ class AutoLoaderReader:
         self.source_format = config["source_format"]
         self.source_options = config["source_options"] or {}
         self.source_schema = config["source_schema"]
-        self.source_path = (
-            f"{Environment.root_path_data}/{config["source_relative_path"]}"
-        )
+        self.source_path = f"{Environment.root_path_data}/{config["source_relative_path"]}"
         self.sink_name = config["sink_name"]
         self.debug = debug
 
@@ -74,7 +72,7 @@ class AutoLoaderReader:
             self.logger.error(f"Initialization error: {e}")
             raise
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def read_stream(self) -> DataFrame:
         """
         Sets up and returns a streaming DataFrame using Auto Loader.
@@ -136,8 +134,9 @@ class AutoLoaderReader:
         return reader
 
 
-@DecoratorUtils.add_logger()
+@DecoratorUtil.add_logger()
 class DeltaTableReader:
+    logger: logging.Logger
     SUPPORTED_MODES = {"full", "backfill", "incremental"}
 
     def __init__(self, spark, config: dict, debug: bool = False):
@@ -146,7 +145,7 @@ class DeltaTableReader:
         self.debug = debug
         self.catalog_sink = Environment.catalog_sink
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def read(self) -> DataFrame | None:
         """
         Reads data from a Delta source using one of the following modes:
@@ -155,11 +154,11 @@ class DeltaTableReader:
         - "incremental": streaming read using Change Data Feed (CDF),
                          with automatic fallback to batch backfill
         """
-        from mdd.helper.deltatable import DeltaTableUtils
+        from mdd.utils import DeltaTableUtil
 
         mode = self.config.get("mode")
         source_name = self.config.get("source_name")
-        self.source_full_name = DeltaTableUtils.qualify_table_name(source_name)  
+        self.source_full_name = DeltaTableUtil.qualify_table_name(source_name)  
 
         if not source_name or not mode:
             msg = (
@@ -233,7 +232,7 @@ class DeltaTableReader:
             "_record_id",
             "_record_timestamp",
         ]
-        df = DeltaTableUtils.safe_drop_columns(df, drop_columns)
+        df = DeltaTableUtil.safe_drop_columns(df, drop_columns)
 
         return df
 

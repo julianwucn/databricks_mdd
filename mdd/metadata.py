@@ -3,17 +3,18 @@ import json
 import inspect
 import logging
 from pathlib import Path
-from mdd.helper.decorator import DecoratorUtils
+from mdd.utils import DecoratorUtil
 from mdd.environment import Environment
 
-@DecoratorUtils.add_logger()
+@DecoratorUtil.add_logger()
 class Metadata:
+    logger: logging.Logger
     def __init__(self, path, debug=False):
         self.path = Path(f"{Environment.root_path_metadata}/{path}")
         self.debug = debug
         self._config = self._load_yaml()
 
-    #@DecoratorUtils.log_function(), do not add this because it is called by init
+    #@DecoratorUtil.log_function(), do not add this because it is called by init
     def _load_yaml(self):
         if not self.path.exists():
             message = f"YAML file not found: {self.path}"
@@ -28,7 +29,7 @@ class Metadata:
                 self.logger.error(message)
                 raise ValueError(message)
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def get(self, *keys, default=None):
         """
         Fetch nested config values. Example:
@@ -42,12 +43,12 @@ class Metadata:
                 return default
         return value
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def as_dict(self):
         """Return the full config as a dictionary"""
         return self._config
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def to_json(self, indent=2):
         """Convert the YAML content to a JSON string"""
         return json.dumps(self._config, indent=indent)

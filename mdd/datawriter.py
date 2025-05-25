@@ -6,13 +6,12 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import DataType
 from mdd.environment import Environment
-from mdd.helper.decorator import DecoratorUtils
-from mdd.helper.function import FunctionUtils as util
-from mdd.helper.deltatable import DeltaTableUtils as dtu
+from mdd.utils import DecoratorUtil, FunctionUtil, DeltaTableUtil
 
 
-@DecoratorUtils.add_logger()
+@DecoratorUtil.add_logger()
 class DeltaTableWriter:
+    logger: logging.Logger
     def __init__(
         self, spark: SparkSession, df: DataFrame, config: dict, debug: bool = False
     ):
@@ -21,7 +20,7 @@ class DeltaTableWriter:
         self.df = df
         self.debug = debug
 
-        self.sink_name = dtu.qualify_table_name(config['sink_name'])
+        self.sink_name = DeltaTableUtil.qualify_table_name(config['sink_name'])
         self.sink_projected_script = config["sink_projected_script"]
         self.sink_write_mode = config["sink_write_mode"]
         self.sink_primarykey = config["sink_primarykey"]
@@ -95,7 +94,7 @@ class DeltaTableWriter:
                 "Unsupported trigger type '{self.sink_write_trigger}'. Must be one of ['processingTime', 'once', 'availableNow']"
             )
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def _projected(self, df: DataFrame, projected_script: str) -> DataFrame:
         """
         Projects the DataFrame based on the specified SQL script.
@@ -118,7 +117,7 @@ class DeltaTableWriter:
                 self.logger.error(message)
                 raise ValueError(message)
 
-            temp_view = util.get_temp_view_name()
+            temp_view = FunctionUtil.get_temp_view_name()
             projected_sql = projected_script.replace(placeholder, temp_view)
 
             if self.debug:
@@ -145,7 +144,7 @@ class DeltaTableWriter:
             self.logger.error(f"Error in _projected: {e}")
             raise
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def _match_columns(self, df: DataFrame, sink_name: str) -> DataFrame:
         """
         Aligns, casts, and validates the DataFrame's columns against the target Delta table,
@@ -159,13 +158,13 @@ class DeltaTableWriter:
         """
         # import again since the function is executed in a write stream
         from pyspark.sql import functions as F
-        from mdd.helper.deltatable import DeltaTableUtils as dtu
+        from mdd.helper.deltatable import DeltaTableUtil
 
         source_columns = set(df.columns)
         target_df = self.spark.table(sink_name)
 
         # Get generated columns to exclude from comparison
-        generated_columns = dtu.get_generated_columns(self.spark, sink_name)
+        generated_columns = DeltaTableUtil.get_generated_columns(self.spark, sink_name)
 
         # Build target schema excluding generated columns
         target_schema = [
@@ -202,7 +201,7 @@ class DeltaTableWriter:
         # Return reordered and casted DataFrame
         return df.select(casted_columns)
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def _validate_source_columns_in_sink(self, df: DataFrame, sink_name: str):
         """
         Ensure all source columns in the DataFrame exist in the sink table schema,
@@ -212,11 +211,11 @@ class DeltaTableWriter:
         :param sink_name: Fully qualified Delta table name
         :raises ValueError: If any source column does not exist in sink
         """
-        from mdd.helper.deltatable import DeltaTableUtils as dtu
+        from mdd.helper.deltatable import DeltaTableUtil
 
         source_columns = set(df.columns)
         sink_df = self.spark.table(sink_name)
-        generated_columns = dtu.get_generated_columns(self.spark, sink_name)
+        generated_columns = DeltaTableUtil.get_generated_columns(self.spark, sink_name)
         sink_columns = {
             field.name
             for field in sink_df.schema.fields
@@ -234,7 +233,7 @@ class DeltaTableWriter:
                 self.logger.debug(error_message)
             raise ValueError(error_message)
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def _upsert_to_delta(self, micro_batch_df: DataFrame, batch_id: int):
         """
         Performs Delta upsert:
@@ -242,7 +241,7 @@ class DeltaTableWriter:
         - Updates existing records only if non-generated, meaningful fields have changed
         - Skips updating technical or generated columns
         """
-        from mdd.helper.deltatable import DeltaTableUtils as dtu
+        from mdd.helper.deltatable import DeltaTableUtil
 
         try:
             if self.debug:
@@ -254,12 +253,12 @@ class DeltaTableWriter:
             alias_table = "target"
 
             # === Get join condition on primary key ===
-            join_condition = dtu.get_join_condition(
+            join_condition = DeltaTableUtil.get_join_condition(
                 alias_df, alias_table, self.sink_primarykey
             )
 
             # === Get generated columns from table ===
-            generated_columns = dtu.get_generated_columns(self.spark, self.sink_name)
+            generated_columns = DeltaTableUtil.get_generated_columns(self.spark, self.sink_name)
 
             all_columns = micro_batch_df.columns
 
@@ -327,7 +326,7 @@ class DeltaTableWriter:
             self.logger.error(f"Upsert failed for batch {batch_id}: {e}")
             raise
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def _filter_already_processed_files(self, df: DataFrame) -> tuple:
         """
         Filters out records from files already processed (based on _source_name and _source_timestamp)
@@ -383,7 +382,7 @@ class DeltaTableWriter:
 
         return df_filtered, already_processed_files
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def _filter_late_records(self, df: DataFrame) -> tuple:
         """
         Filters out records that are older or equal based on the watermark column
@@ -412,7 +411,7 @@ class DeltaTableWriter:
             )
 
         try:
-            key_list = util.string_to_list(self.sink_primarykey)
+            key_list = FunctionUtil.string_to_list(self.sink_primarykey)
             target_df = (
                 self.spark.table(self.sink_name)
                 .selectExpr(*key_list, self.sink_watermark_column)
@@ -427,7 +426,7 @@ class DeltaTableWriter:
         alias_df = "updates"
         alias_target = "target"
 
-        join_condition = dtu.get_join_condition(
+        join_condition = DeltaTableUtil.get_join_condition(
             alias_df, alias_target, self.sink_primarykey
         )
 
@@ -454,7 +453,7 @@ class DeltaTableWriter:
 
         return filtered_df, filtered_count
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def write_stream(self):
         """
         Configure and start the streaming write based on the provided settings.

@@ -1,14 +1,100 @@
+import logging
+import inspect
 import re
-from functools import reduce
+import uuid
+from itertools import chain
+from functools import wraps, reduce
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.types import StringType, TimestampType
 from pyspark.sql.functions import create_map, col, lit, expr
 from delta.tables import DeltaTable
-from itertools import chain
 
 from mdd.environment import Environment
 
-class DeltaTableUtils:
+class DecoratorUtil:
+    @staticmethod
+    def add_logger():
+        """Class decorator to add a logger to the class."""
+        def decorator(cls):
+            cls.logger = logging.getLogger(f"mdd.{cls.__name__}")
+            return cls
+        return decorator
+
+    @staticmethod
+    def _get_clean_call_trace(self_obj, target_func: str, max_depth=10) -> str:
+        """
+        Returns a clean call trace (e.g., foo -> bar), showing only methods of the same instance
+        and excluding the decorator wrapper itself.
+
+        Args:
+            self_obj: Instance (`self`) of the current class
+            target_func: The actual function being decorated
+            max_depth: Stack depth
+
+        Returns:
+            str: Clean trace string
+        """
+        trace = []
+        stack = inspect.stack()
+
+        for frame in stack[1:max_depth + 1]:
+            frame_self = frame.frame.f_locals.get("self")
+            func_name = frame.function
+
+            # Keep only frames from this object
+            if frame_self is self_obj:
+                # Exclude decorator's internal `wrapper` frame
+                if func_name != "wrapper":
+                    trace.append(func_name)
+
+        # Add the actual decorated function name at the end
+        if not trace or trace[-1] != target_func:
+            trace.append(target_func)
+
+        return " -> ".join(trace) if trace else target_func
+
+    @staticmethod
+    def log_function(debug_attr: str = "debug"):
+        def decorator(func):
+            @wraps(func)
+            def wrapper(self, *args, **kwargs):
+                if getattr(self, debug_attr, False):
+                    trace = DecoratorUtil._get_clean_call_trace(self_obj=self, target_func=func.__name__)
+                    self.logger.debug(f"function start: {trace}")
+                    result = func(self, *args, **kwargs)
+                    self.logger.debug(f"function end: {trace}")
+                    return result
+                return func(self, *args, **kwargs)
+            return wrapper
+        return decorator
+
+class FunctionUtil:
+    @staticmethod
+    def timestamp_to_string(timestamp):
+        """
+        Convert timestamp to string format: 'YYYY-MM-DD HH:mm:ss.SSSSSS'
+        """
+        return timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+    @staticmethod
+    def get_temp_view_name() -> str:
+        """
+        Generate a unique temporary view name.
+        """
+        # "-" is not allowed in spark sql
+        return f"vw_temp_{str(uuid.uuid4()).replace('-', '_')}"
+
+    @staticmethod
+    def string_to_list(value: str):
+        """
+        Convert a comma-separated string to a list of cleaned keys.
+        """
+        if not value:
+            return []
+        return [k.strip() for k in value.split(",") if k.strip()]
+
+
+class DeltaTableUtil:
     @staticmethod
     def qualify_table_name(table_name: str) -> str:
         """
@@ -52,7 +138,7 @@ class DeltaTableUtils:
         :raises ValueError: If the target_column does not exist in the table
         """
         try:
-            table_full_name = DeltaTableUtils.qualify_table_name(table_name)
+            table_full_name = DeltaTableUtil.qualify_table_name(table_name)
             df = spark.read.format("delta").table(table_full_name)
 
             if target_column not in df.columns:
@@ -109,7 +195,7 @@ class DeltaTableUtils:
         """
 
         # ensure table existence
-        table_full_name = DeltaTableUtils.qualify_table_name(table_name)
+        table_full_name = DeltaTableUtil.qualify_table_name(table_name)
         try:
             spark.sql(f"DESCRIBE TABLE {table_full_name}")
         except Exception as e:
@@ -175,7 +261,7 @@ class DeltaTableUtils:
         :param table_name: QualifiedName of the Delta table
         :return: List of column names that are generated always as
         """
-        table_full_name = DeltaTableUtils.qualify_table_name(table_name)
+        table_full_name = DeltaTableUtil.qualify_table_name(table_name)
         ddl = spark.sql(f"SHOW CREATE TABLE {table_full_name}").collect()[0][0]
         gen_col_pattern = re.compile(r"generated\s+always\s+as", re.IGNORECASE)
         generated_columns = []

@@ -1,13 +1,13 @@
-from mdd.helper.decorator import DecoratorUtils
-from mdd.helper.deltatable import DeltaTableUtils as dtu
+from mdd.utils import DecoratorUtil, DeltaTableUtil
 from mdd.metadata import Metadata
 from mdd.datareader import AutoLoaderReader
 from mdd.datawriter import DeltaTableWriter
 from pyspark.sql import SparkSession
 import logging
 
-@DecoratorUtils.add_logger()
+@DecoratorUtil.add_logger()
 class OnboardDataFlow:
+    logger: logging.Logger
     def __init__(self, spark: SparkSession, metadata_yml: str):
         self.spark = spark
         self.metadata = Metadata(metadata_yml, False)
@@ -19,7 +19,7 @@ class OnboardDataFlow:
             self.logger.error(message)
             raise Exception(message)
 
-    @DecoratorUtils.log_function()
+    @DecoratorUtil.log_function()
     def run(self):
         active = self.metadata.get("active")
         sink_name = self.metadata.get("writer", "sink_name")
@@ -37,7 +37,7 @@ class OnboardDataFlow:
         self.logger.info(f"Sink validation: {sink_name}")
         corrupt_record = self.metadata.get("reader", "_corrupt_record") 
         rescued_data = self.metadata.get("reader", "_rescued_data") 
-        dtu.ensure_system_columns(self.spark, sink_name, corrupt_record, rescued_data, False)
+        DeltaTableUtil.ensure_system_columns(self.spark, sink_name, corrupt_record, rescued_data, False)
 
         self.logger.info(f"Read data: {source_relative_path}")
 

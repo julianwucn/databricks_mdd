@@ -46,7 +46,7 @@ handlers:
         mode: a
 
     smtp_tls_gmail: 
-        class: env.mdd.logger.TlsSMTPHandler
+        class: mdd.logger.TlsSMTPHandler
         level: ERROR
         formatter: formatter_2
         mailhost: [smtp.gmail.com, 587]
@@ -57,7 +57,7 @@ handlers:
         credentials: [julian.wu.cn@gmail.com, cxyqlpudnjdkrztx]
 
     smtp_tls_office365: 
-        class: env.mdd.logger.TlsSMTPHandler
+        class: mdd.logger.TlsSMTPHandler
         level: ERROR
         formatter: formatter_2
         mailhost: [smtp.office365.com, 587]
