@@ -3,7 +3,7 @@ from pyspark.sql import DataFrame, SparkSession
 # the following import moved to the read stream to avoid the error "name 'col' is not defined"
 # interactive notebooks will keep the state of last run and the functions will be out of scope
 # from pyspark.sql.functions import lit, col, expr, current_timestamp
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 import inspect
 import logging
 from delta.tables import DeltaTable
@@ -146,7 +146,7 @@ class DeltaTableReader:
         self.catalog_sink = Environment.catalog_sink
 
     @DecoratorUtil.log_function()
-    def read(self) -> DataFrame | None:
+    def read_stream(self) -> Tuple[DataFrame, str]:
         """
         Reads data from a Delta source using one of the following modes:
         - "full": batch read, with optional timestamp filter
@@ -158,17 +158,12 @@ class DeltaTableReader:
 
         mode = self.config.get("mode")
         source_name = self.config.get("source_name")
-        self.source_full_name = DeltaTableUtil.qualify_table_name(source_name)  
+        self.source_full_name = DeltaTableUtil.get_table_full_name(source_name)
 
         if not source_name or not mode:
             msg = (
                 "'source_name' and valid 'mode' dictionary must be provided in config."
             )
-            self.logger.error(msg)
-            raise ValueError(msg)
-
-        if mode not in self.SUPPORTED_MODES:
-            msg = f"Unsupported mode '{mode}'. Supported modes: {self.SUPPORTED_MODES}"
             self.logger.error(msg)
             raise ValueError(msg)
 
@@ -208,17 +203,15 @@ class DeltaTableReader:
             value = self.config.get("incremental_max_processed_version")
             df, mode = self._read_incremental(self.source_full_name, value)
         else:
-            return None
-
-        if df is None:
-            return None
+            msg = f"Unsupported mode '{mode}'. Supported modes: {self.SUPPORTED_MODES}"
+            self.logger.error(msg)
+            raise ValueError(msg)
 
         # Add metadata
         from pyspark.sql.functions import col, lit
         df = (
             df.withColumn("_source_name", lit(source_name))
             .withColumn("_source_timestamp", col("_record_timestamp"))
-            .withColumn("_mode", lit(mode))  # Corrected: no set
         )
 
         if "_change_type" not in df.columns:
@@ -234,18 +227,17 @@ class DeltaTableReader:
         ]
         df = DeltaTableUtil.safe_drop_columns(df, drop_columns)
 
-        return df
+        return df, mode
 
-    def _read_full(self, source_name: str, timestamp: str | None) -> DataFrame:
-        df = self.spark.read.format("delta").table(source_name)
-        if timestamp:
-            df = df.filter(col("_record_timestamp") > expr(f"timestamp('{timestamp}')"))
+    def _read_full(self, source_name: str) -> DataFrame:
+        df = self.spark.readStream.format("delta").table(source_name)
+
         return df
 
     def _read_backfill(self, source_name: str, days: int | None) -> DataFrame:
         days = days or 7
         return (
-            self.spark.read.format("delta")
+            self.spark.readStream.format("delta")
             .table(source_name)
             .filter(
                 to_date(col("_record_timestamp"))
@@ -255,14 +247,14 @@ class DeltaTableReader:
 
     def _read_incremental(
         self, source_name: str, cdf_version: int
-    ) -> DataFrame | None:
+    ) -> Tuple[DataFrame, str]:
         mode = "incremental"
 
         if cdf_version is None:
             msg = "No CDF version, falling back to full mode"
             self.logger.warning(msg)
-            df = self._read_full(source_name, None)
-            mode = "incremental -> full"
+            df = self._read_full(source_name)
+            mode = "full"
 
         elif cdf_version < self.min_version or cdf_version > self.max_version:
             fallback_days = self.config.get("fallback_backfill_days", 7)
@@ -272,7 +264,7 @@ class DeltaTableReader:
             )
             self.logger.warning(msg)
             df = self._read_backfill(source_name, fallback_days)
-            mode = "incremental -> backfill"
+            mode = "backfill"
 
         elif cdf_version == self.max_version:
             self.logger.info("No new changes since last CDF version. Returning None.")

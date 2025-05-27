@@ -1,9 +1,9 @@
+import logging
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StringType
+
 from mdd.utils import DecoratorUtil, DeltaTableUtil
 from mdd.metadata import Metadata
-from mdd.datareader import AutoLoaderReader
-from mdd.datawriter import DeltaTableWriter
-from pyspark.sql import SparkSession
-import logging
 
 @DecoratorUtil.add_logger()
 class OnboardDataFlow:
@@ -24,9 +24,11 @@ class OnboardDataFlow:
         active = self.metadata.get("active")
         sink_name = self.metadata.get("writer", "sink_name")
         source_relative_path = self.metadata.get("reader", "source_relative_path")
+        pathGlobFilter = self.metadata.get("reader", "source_options", "pathGlobFilter")
+        source_Name = f"{source_relative_path}*/{pathGlobFilter}"
 
-        onboard_name = f"{source_relative_path} => {sink_name}"
-        self.logger.info(f"Onboard data start: {onboard_name}")
+        onboard_name = f"{source_Name} => {sink_name}"
+        self.logger.info(f"Onboard start: {onboard_name}")
 
         if not active:
             message = f"Dataflow is not active: {self.metadata_yml_path}"
@@ -35,11 +37,13 @@ class OnboardDataFlow:
         
         # validate table existence and ensure system columns existence
         self.logger.info(f"Sink validation: {sink_name}")
-        corrupt_record = self.metadata.get("reader", "_corrupt_record") 
-        rescued_data = self.metadata.get("reader", "_rescued_data") 
-        DeltaTableUtil.ensure_system_columns(self.spark, sink_name, corrupt_record, rescued_data, False)
+        corrupt_column = self.metadata.get("reader", "_corrupt_record") or "_corrupt_record"
+        rescued_column = self.metadata.get("reader", "_rescued_data") or "_rescued_data"
 
-        self.logger.info(f"Read data: {source_relative_path}")
+        extra_columns = {corrupt_column: StringType(), rescued_column: StringType()}
+        DeltaTableUtil.ensure_system_columns(self.spark, sink_name, extra_columns)
+
+        self.logger.info(f"Read data: {source_Name}")
 
         # get reader config
         config_reader = self.metadata.get("reader")
@@ -47,6 +51,7 @@ class OnboardDataFlow:
         config_reader["sink_name"] = sink_name
 
         # read the data
+        from mdd.datareader import AutoLoaderReader
         reader = AutoLoaderReader(self.spark, config_reader, self.debug)
         df = reader.read_stream()
 
@@ -56,9 +61,13 @@ class OnboardDataFlow:
         config_writer = self.metadata.get("writer")
         
         # write the data
-        writer = DeltaTableWriter(self.spark, df, config_writer, self.debug)
-        query = writer.write_stream()
+        from mdd.datawriter import DeltaTableWriter
+        writer = DeltaTableWriter(self.spark, config_writer, self.debug)
+        query = writer.write_stream(df)
         query.awaitTermination()
 
-        self.logger.info(f"Onboard data end: {onboard_name}")
+        # run post script
+        writer.execute_postscript()
+
+        self.logger.info(f"Onboard end: {onboard_name}")
 

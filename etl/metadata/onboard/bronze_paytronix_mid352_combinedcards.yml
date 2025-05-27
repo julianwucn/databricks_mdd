@@ -42,9 +42,10 @@ reader:
 writer:
     sink_name: bronze.paytronix_mid352_combinedcards
     sink_projected_script: select * from vw_temp_source_data_uuid
-    sink_write_mode: append #append, update (complete is not supported)
+    sink_write_mode: update #append, update (complete is not supported)
     sink_primarykey: combine_datetime, primary_card_number, added_card_number # mandatory for update mode
-    sink_watermark_column: file_date
+    sink_deduplication_columns: _source_name desc, account_code
+    sink_watermark_column: null
     sink_update_changes_only: true
     sink_write_options:
         mergeSchema: false
@@ -60,4 +61,4 @@ writer:
         expectation_rule_type: sql # sql, ge
         expectation_violation_action: warn #warn, drop, fail
         expectation_violation_action_script: null
-        active: false 
+        active: false

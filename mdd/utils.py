@@ -4,10 +4,10 @@ import re
 import uuid
 from itertools import chain
 from functools import wraps, reduce
+from pyspark.sql.window import Window
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.types import StringType, TimestampType
-from pyspark.sql.functions import create_map, col, lit, expr
-from delta.tables import DeltaTable
+from pyspark.sql.types import StringType, TimestampType, BooleanType
+from pyspark.sql.functions import create_map, col, lit, expr, row_number
 
 from mdd.environment import Environment
 
@@ -96,7 +96,7 @@ class FunctionUtil:
 
 class DeltaTableUtil:
     @staticmethod
-    def qualify_table_name(table_name: str) -> str:
+    def get_table_full_name(table_name: str) -> str:
         """
         Ensures the table_name includes the lakehouse name. Adds Environment.catalog_default if missing.
 
@@ -138,7 +138,7 @@ class DeltaTableUtil:
         :raises ValueError: If the target_column does not exist in the table
         """
         try:
-            table_full_name = DeltaTableUtil.qualify_table_name(table_name)
+            table_full_name = DeltaTableUtil.get_table_full_name(table_name)
             df = spark.read.format("delta").table(table_full_name)
 
             if target_column not in df.columns:
@@ -176,9 +176,7 @@ class DeltaTableUtil:
     def ensure_system_columns(
         spark: SparkSession,
         table_name: str,
-        corrupt_column: str = None,
-        rescued_column: str = None,
-        debug: bool = False
+        extra_columns: dict = None 
     ):
         """
         Ensures that the specified Delta table has the required system columns.
@@ -188,32 +186,25 @@ class DeltaTableUtil:
             table_name (str): Qualified Delta table name (e.g. 'schema.table').
             corrupt_column (str): Name of the corrupt record column. Defaults to '_corrupt_record'.
             rescued_column (str): Name of the rescued data column. Defaults to '_rescued_data'.
-            debug (bool): If True prints debug messages.
 
         Returns:
             bool: True if the table has the required system columns, False otherwise.
         """
 
         # ensure table existence
-        table_full_name = DeltaTableUtil.qualify_table_name(table_name)
+        table_full_name = DeltaTableUtil.get_table_full_name(table_name)
         try:
             spark.sql(f"DESCRIBE TABLE {table_full_name}")
         except Exception as e:
            raise ValueError(f"Table '{table_full_name}' does not exist.")
        
-        # Define required system columns and their data types
-        if corrupt_column is None:
-            corrupt_column = "_corrupt_record"
-        if rescued_column is None:
-            rescued_column = "_rescued_data"
-       
-        required_columns = {
-            corrupt_column: StringType(),
-            rescued_column: StringType(),
+        extra_columns = extra_columns or {}
+        required_columns = extra_columns | {
             "_source_name": StringType(),
             "_source_timestamp": TimestampType(),
             "_record_id": StringType(),
-            "_record_timestamp": TimestampType()
+            "_record_timestamp": TimestampType(),
+            "_record_deleted": BooleanType()
         }
 
         # Get current table schema
@@ -232,8 +223,6 @@ class DeltaTableUtil:
                     spark.sql(ddl)
             except Exception as e:
                 raise Exception(f"Error adding missing columns to table '{table_full_name}': {e}")
-        
-        print("end")
 
     @staticmethod
     def get_join_condition(alias_df: str, alias_table: str, primary_keys: str) -> str:
@@ -253,7 +242,7 @@ class DeltaTableUtil:
         return reduce(lambda x, y: f"{x} and {y}", conditions)
 
     @staticmethod
-    def get_generated_columns(spark, table_name: str) -> list:
+    def get_generated_columns(spark: SparkSession, table_name: str) -> list:
         """
         Extracts a list of generated columns from the given Delta table.
 
@@ -261,7 +250,7 @@ class DeltaTableUtil:
         :param table_name: QualifiedName of the Delta table
         :return: List of column names that are generated always as
         """
-        table_full_name = DeltaTableUtil.qualify_table_name(table_name)
+        table_full_name = DeltaTableUtil.get_table_full_name(table_name)
         ddl = spark.sql(f"SHOW CREATE TABLE {table_full_name}").collect()[0][0]
         gen_col_pattern = re.compile(r"generated\s+always\s+as", re.IGNORECASE)
         generated_columns = []
@@ -272,3 +261,153 @@ class DeltaTableUtil:
                 generated_columns.append(col_name)
 
         return generated_columns
+
+    @staticmethod
+    def match_columns(spark: SparkSession, df: DataFrame, sink_name: str) -> DataFrame:
+        """
+        Aligns, casts, and validates the DataFrame's columns against the target Delta table,
+        excluding generated columns. Reorders columns and attempts to cast them to match
+        the target schema.
+
+        :param df: Source DataFrame
+        :param sink_name: Fully qualified Delta table name (e.g., 'db.bronze.table')
+        :return: DataFrame with aligned and casted columns
+        :raises ValueError: If columns do not match or cannot be cast
+        """
+        # import again since the function is executed in a write stream
+        from pyspark.sql import functions as F
+
+        source_columns = set(df.columns)
+        target_df = spark.table(sink_name)
+
+        # Get generated columns to exclude from comparison
+        generated_columns = DeltaTableUtil.get_generated_columns(spark, sink_name)
+
+        # Build target schema excluding generated columns
+        target_schema = [
+            field
+            for field in target_df.schema.fields
+            if field.name not in generated_columns
+        ]
+        target_column_names = [field.name for field in target_schema]
+        target_column_types = {field.name: field.dataType for field in target_schema}
+
+        # Validate source and target columns (as sets, ignoring order)
+        if set(target_column_names) != source_columns:
+            error_message = (
+                f"Schema mismatch for table '{sink_name}'.\n"
+                f"Expected columns (excluding generated): {sorted(target_column_names)}\n"
+                f"Provided DataFrame columns: {sorted(source_columns)}"
+            )
+            raise ValueError(error_message)
+
+        # Attempt to cast source DataFrame columns to match target schema
+        casted_columns = []
+        for col_name in target_column_names:
+            target_type: DataType = target_column_types[col_name]
+            try:
+                casted_columns.append(F.col(col_name).cast(target_type).alias(col_name))
+            except Exception as e:
+                error_message = f"Failed to cast column '{col_name}' to type '{target_type.simpleString()}': {e}"
+                raise ValueError(error_message)
+
+        # Return reordered and casted DataFrame
+        return df.select(casted_columns)
+
+    @staticmethod
+    def validate_columns(spark: SparkSession, df: DataFrame, sink_name: str):
+        """
+        Ensure all source columns in the DataFrame exist in the sink table schema,
+        excluding any generated columns.
+
+        :param df: DataFrame to validate
+        :param sink_name: Fully qualified Delta table name
+        :raises ValueError: If any source column does not exist in sink
+        """
+        source_columns = set(df.columns)
+        sink_df = spark.table(sink_name)
+        generated_columns = DeltaTableUtil.get_generated_columns(spark, sink_name)
+        sink_columns = {
+            field.name
+            for field in sink_df.schema.fields
+            if field.name not in generated_columns
+        }
+
+        missing_columns = source_columns - sink_columns
+        if missing_columns:
+            error_message = (
+                f"Update mode validation failed: Source DataFrame contains columns not present in sink table '{sink_name}'.\n"
+                f"Missing in sink: {sorted(missing_columns)}\n"
+                f"Sink columns (excluding generated): {sorted(sink_columns)}"
+            )
+            raise ValueError(error_message)
+
+    @staticmethod
+    def get_checkpointlocation_path(sink_name: str, checkpointlocation: str, sync_mode: str) -> str:
+        """
+        Constructs the full checkpoint location path for a given sink.
+
+        :param sink_name: The name of the sink table.
+        :param checkpointlocation: Optional suffix for distinguishing multiple checkpoints.
+        :param sync_mode: The sync mode ("full", "incremental", etc.) — not used here but included for context or future use.
+        :return: Fully qualified checkpoint location path.
+        """
+        base_path = f"{Environment.root_path_autoloader}/{sink_name}/_checkpoint"
+
+        if checkpointlocation:
+            return f"{base_path}/{checkpointlocation}"
+
+        return base_path
+
+    @staticmethod
+    def deduplicate(df: DataFrame, primary_key: str, deduplication_columns: str) -> DataFrame:
+        """
+        Deduplicates the DataFrame by keeping only one record per primary key,
+        using composite deduplication columns with optional sort direction.
+
+        :param df: Input Spark DataFrame
+        :param primary_key: Comma-separated list of primary key columns (e.g., "id,sub_id")
+        :param deduplication_columns: String defining columns and sort directions
+            (e.g., "event_time desc, event_sequence", defaults to asc if not specified)
+        :return: Deduplicated DataFrame
+        """
+        if not primary_key or not deduplication_columns:
+            message = "primary key and deduplication columns are required"
+            raise ValueError(message)
+
+        primary_keys = FunctionUtil.string_to_list(primary_key)
+        try:
+            # Parse deduplication column string
+            sort_exprs = []
+            for entry in deduplication_columns.split(","):
+                parts = entry.strip().split()
+                if len(parts) == 1:
+                    col_name, direction = parts[0], "asc"
+                elif len(parts) == 2:
+                    col_name, direction = parts[0], parts[1].lower()
+                else:
+                    raise ValueError(
+                        f"Invalid format for deduplication column: '{entry.strip()}'"
+                    )
+
+                if direction == "desc":
+                    sort_exprs.append(col(col_name).desc())
+                elif direction == "asc":
+                    sort_exprs.append(col(col_name).asc())
+                else:
+                    raise ValueError(
+                        f"Unsupported sort order '{direction}' for column '{col_name}'"
+                    )
+
+            window_spec = Window.partitionBy(*primary_keys).orderBy(*sort_exprs)
+            df_deduplicated = (
+                df.withColumn("_row_number", row_number().over(window_spec))
+                .filter(col("_row_number") == 1)
+                .drop("_row_number")
+            )
+
+        except Exception as e:
+            message = f"Error during deduplication: {e}"
+            raise Exception(message)
+
+        return df_deduplicated
