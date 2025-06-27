@@ -50,22 +50,22 @@ handlers:
         level: ERROR
         formatter: formatter_2
         mailhost: [smtp.gmail.com, 587]
-        fromaddr: julian.wu.cn@gmail.com
+        fromaddr: wuj@gmail.com
         toaddrs: 
-            - wuj@bostonpizza.com
+            - wuj@abc.com
         subject: MDD Error
-        credentials: [julian.wu.cn@gmail.com, cxyqlpudnjdkrztx]
+        credentials: [wuj@gmail.com, abc]
 
     smtp_tls_office365: 
         class: mdd.logger.TlsSMTPHandler
         level: ERROR
         formatter: formatter_2
         mailhost: [smtp.office365.com, 587]
-        fromaddr: wuj@bostonpizza.com
+        fromaddr: wuj@abc.com
         toaddrs: 
-            - wuj@bostonpizza.com
+            - wuj@bac.com
         subject: MDD Error
-        credentials: [wuj@bostonpizza.com, YourPassword]
+        credentials: [wuj@bac.com, YourPassword]
 
 loggers:
     mdd:
