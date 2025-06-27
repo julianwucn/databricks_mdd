@@ -13,9 +13,8 @@ from pyspark.sql.window import Window
 from mdd.utils import DecoratorUtil, DeltaTableUtil
 from mdd.environment import Environment
 
-
 @DecoratorUtil.add_logger()
-class AutoLoaderReader:
+class FileReader:
     logger: logging.Logger
     def __init__(
         self,
@@ -24,7 +23,7 @@ class AutoLoaderReader:
         debug: bool = False,
     ):
         """
-        Initializes the AutoLoaderReader class with the provided SparkSession, config, and debug flag.
+        Initializes the FileReader class with the provided SparkSession, config, and debug flag.
         Parameters:
             spark (SparkSession): The SparkSession object.
             config (Dict): The configuration dictionary.
@@ -55,7 +54,7 @@ class AutoLoaderReader:
             else:
                 # rebuild the location
                 schema_location = (
-                    f"{Environment.root_path_autoloader}/{self.sink_name}/_schema"
+                    f"{Environment.root_path_state}/{self.sink_name}/_schema"
                 )
                 cloudfiles_schemalocation = self.source_options[location_key]
                 if cloudfiles_schemalocation is not None:
@@ -207,25 +206,26 @@ class DeltaTableReader:
             self.logger.error(msg)
             raise ValueError(msg)
 
-        # Add metadata
-        from pyspark.sql.functions import col, lit
-        df = (
-            df.withColumn("_source_name", lit(source_name))
-            .withColumn("_source_timestamp", col("_record_timestamp"))
-        )
-
-        if "_change_type" not in df.columns:
+        if df:
+            # Add metadata
+            from pyspark.sql.functions import col, lit
             df = (
-                df.withColumn("_change_type", lit("insert"))
-                .withColumn("_commit_version", lit(self.max_version))
-                .withColumn("_commit_timestamp", col("_record_timestamp"))
+                df.withColumn("_source_name", lit(source_name))
+                .withColumn("_source_timestamp", col("_record_timestamp"))
             )
 
-        drop_columns = [
-            "_record_id",
-            "_record_timestamp",
-        ]
-        df = DeltaTableUtil.safe_drop_columns(df, drop_columns)
+            if "_change_type" not in df.columns:
+                df = (
+                    df.withColumn("_change_type", lit("insert"))
+                    .withColumn("_commit_version", lit(self.max_version))
+                    .withColumn("_commit_timestamp", col("_record_timestamp"))
+                )
+
+            drop_columns = [
+                "_record_id",
+                "_record_timestamp",
+            ]
+            df = DeltaTableUtil.safe_drop_columns(df, drop_columns)
 
         return df, mode
 
@@ -246,37 +246,34 @@ class DeltaTableReader:
         )
 
     def _read_incremental(
-        self, source_name: str, cdf_version: int
-    ) -> Tuple[DataFrame, str]:
-        mode = "incremental"
-
+        self, source_name: str, cdf_version: Optional[int]
+    ) -> Tuple[Optional[DataFrame], str]:
         if cdf_version is None:
-            msg = "No CDF version, falling back to full mode"
-            self.logger.warning(msg)
-            df = self._read_full(source_name)
-            mode = "full"
+            self.logger.warning("No data processed, falling back to full mode")
+            return self._read_full(source_name), "full"
 
-        elif cdf_version < self.min_version or cdf_version > self.max_version:
+        if cdf_version < self.min_version or cdf_version > self.max_version:
             fallback_days = self.config.get("fallback_backfill_days", 7)
-            msg = (
+            self.logger.warning(
                 f"CDF version {cdf_version} out of range [{self.min_version}, {self.max_version}]. "
                 f"Falling back to backfill ({fallback_days} days)."
             )
-            self.logger.warning(msg)
-            df = self._read_backfill(source_name, fallback_days)
-            mode = "backfill"
+            return self._read_backfill(source_name, fallback_days), "backfill"
 
-        elif cdf_version == self.max_version:
-            self.logger.info("No new changes since last CDF version. Returning None.")
-            df = None
+        if cdf_version == self.max_version:
+            self.logger.info(f"No new data, max version read: {self.max_version}")
+            return None, "incremental"
 
-        else:
-            df = (
-                self.spark.readStream.format("delta")
-                .option("readChangeFeed", "true")
-                .option("startingVersion", cdf_version + 1)
-                .option("endingVersion", self.max_version)
-                .table(source_name)
+        if self.debug:
+            self.logger.debug(
+                f"Reading incremental data from version {cdf_version + 1} to {self.max_version}"
             )
 
-        return df, mode
+        df = (
+            self.spark.readStream.format("delta")
+            .option("readChangeFeed", "true")
+            .option("startingVersion", cdf_version + 1)
+            .option("endingVersion", self.max_version)
+            .table(source_name)
+        )
+        return df, "incremental"

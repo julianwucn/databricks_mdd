@@ -6,7 +6,7 @@ from mdd.utils import DecoratorUtil, DeltaTableUtil
 from mdd.metadata import Metadata
 
 @DecoratorUtil.add_logger()
-class OnboardDataFlow:
+class Onboarder:
     logger: logging.Logger
     def __init__(self, spark: SparkSession, metadata_yml: str):
         self.spark = spark
@@ -51,8 +51,8 @@ class OnboardDataFlow:
         config_reader["sink_name"] = sink_name
 
         # read the data
-        from mdd.datareader import AutoLoaderReader
-        reader = AutoLoaderReader(self.spark, config_reader, self.debug)
+        from mdd.datareader import FileReader
+        reader = FileReader(self.spark, config_reader, self.debug)
         df = reader.read_stream()
 
         self.logger.info(f"Write data: {sink_name}")
@@ -62,8 +62,8 @@ class OnboardDataFlow:
         
         # write the data
         from mdd.datawriter import DeltaTableWriter
-        writer = DeltaTableWriter(self.spark, config_writer, self.debug)
-        query = writer.write_stream(df)
+        writer = DeltaTableWriter(self.spark, config_writer, df, self.debug)
+        query = writer.write_stream()
         query.awaitTermination()
 
         # run post script

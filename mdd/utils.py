@@ -2,12 +2,15 @@ import logging
 import inspect
 import re
 import uuid
+import datetime
 from itertools import chain
 from functools import wraps, reduce
+from typing import Optional
+from delta.tables import DeltaTable
 from pyspark.sql.window import Window
-from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.types import StringType, TimestampType, BooleanType
-from pyspark.sql.functions import create_map, col, lit, expr, row_number
+from pyspark.sql import SparkSession, DataFrame, Row
+from pyspark.sql.types import *
+from pyspark.sql.functions import create_map, col, lit, expr, row_number, current_timestamp, desc
 
 from mdd.environment import Environment
 
@@ -60,13 +63,26 @@ class DecoratorUtil:
             def wrapper(self, *args, **kwargs):
                 if getattr(self, debug_attr, False):
                     trace = DecoratorUtil._get_clean_call_trace(self_obj=self, target_func=func.__name__)
-                    self.logger.debug(f"function start: {trace}")
+                    self.logger.debug(f"Function start: {trace}")
                     result = func(self, *args, **kwargs)
-                    self.logger.debug(f"function end: {trace}")
+                    self.logger.debug(f"Function end: {trace}")
                     return result
                 return func(self, *args, **kwargs)
             return wrapper
         return decorator
+
+class NotebookUtil:
+    @staticmethod
+    def get_notebook_name(spark: SparkSession) -> str:
+        """
+        Returns the name of the current notebook.
+        """
+        from pyspark.dbutils import DBUtils
+        dbutils = DBUtils(spark)
+        notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+        notebook_name = notebook_path.split("/")[-1]
+
+        return notebook_name
 
 class FunctionUtil:
     @staticmethod
@@ -352,12 +368,19 @@ class DeltaTableUtil:
         :param sync_mode: The sync mode ("full", "incremental", etc.) — not used here but included for context or future use.
         :return: Fully qualified checkpoint location path.
         """
-        base_path = f"{Environment.root_path_autoloader}/{sink_name}/_checkpoint"
+        full_path = f"{Environment.root_path_state}/{sink_name}/_checkpoint"
+
+        # delete the checkpoint location if the mode is full or backfill
+        if sync_mode in ["full", "backfill"]:
+            shutil.rmtree(full_path, ignore_errors=True)
 
         if checkpointlocation:
-            return f"{base_path}/{checkpointlocation}"
+            full_path = f"{full_path}/{checkpointlocation}"
 
-        return base_path
+        if sync_mode:
+            full_path = f"{full_path}/{sync_mode}"
+
+        return full_path
 
     @staticmethod
     def deduplicate(df: DataFrame, primary_key: str, deduplication_columns: str) -> DataFrame:
@@ -371,8 +394,11 @@ class DeltaTableUtil:
             (e.g., "event_time desc, event_sequence", defaults to asc if not specified)
         :return: Deduplicated DataFrame
         """
-        if not primary_key or not deduplication_columns:
-            message = "primary key and deduplication columns are required"
+        if not deduplication_columns:
+            return df
+
+        if not primary_key:
+            message = "primary key is required"
             raise ValueError(message)
 
         primary_keys = FunctionUtil.string_to_list(primary_key)
@@ -411,3 +437,309 @@ class DeltaTableUtil:
             raise Exception(message)
 
         return df_deduplicated
+    
+    @staticmethod
+    def columns_exist(df, columns, match_all=True):
+        """
+        Check if specified columns exist in a DataFrame.
+
+        Parameters:
+            df (DataFrame): The PySpark DataFrame.
+            columns (List[str]): List of column names to check.
+            match_all (bool): If True, checks that all columns exist.
+                            If False, checks that at least one exists.
+
+        Returns:
+            bool: True if condition met, False otherwise.
+        """
+        df_columns = set(df.columns)
+        target_columns = set(columns)
+
+        if match_all:
+            return target_columns.issubset(df_columns)
+        else:
+            return not df_columns.isdisjoint(target_columns)
+
+class MDDUtil:
+    @staticmethod
+    def save_processed_version(
+        spark: SparkSession,
+        table_name: str,
+        source_name: str,
+        source_commit_version: int,
+        data_sync_mode: str
+    ):
+        # Define schema (matching table definition)
+        schema = StructType([
+            StructField("table_name", StringType(), True),
+            StructField("source_name", StringType(), True),
+            StructField("source_commit_version", LongType(), True),
+            StructField("data_sync_mode", StringType(), True)
+        ])
+
+        # Create a single-row DataFrame
+        data = [(table_name, source_name, source_commit_version, data_sync_mode)]
+        df = spark.createDataFrame(data, schema=schema).withColumn("log_timestamp", current_timestamp())
+
+        # Append data to the table
+        df.write.format("delta").mode("append").saveAsTable("mdd.table_control")
+
+    @staticmethod
+    def get_processed_version(
+        spark: SparkSession,
+        table_name: str,
+        source_name: str
+    ) -> Optional[int]:
+        """
+        Returns the source_commit_version corresponding to the latest log_timestamp
+        for the given table_name and source_name from mdd.table_control.
+        Returns None if no match is found.
+        """
+        try:
+            df = (
+                spark.table("mdd.table_control")
+                .filter((col("table_name") == table_name) & (col("source_name") == source_name))
+                .orderBy(desc("log_timestamp"))
+                .select("source_commit_version")
+                .limit(1)
+            )
+
+            result = df.collect()
+            return result[0]["source_commit_version"] if result else None
+
+        except Exception as e:
+            print(f"Error accessing mdd.table_control: {e}")
+            return None
+    
+    @staticmethod
+    def get_run_id(name: str, timestamp: datetime.datetime) -> str:
+        return f"{name}_{FunctionUtil.timestamp_to_string(timestamp)}"
+
+    @staticmethod
+    def etl_job_update(
+        job_name,
+        job_start_timestamp,
+        job_end_timestamp,
+        job_status,
+        error_message
+    ):
+        table_full_name = DeltaTableUtil.get_table_full_name("mdd.etl_job")
+        job_run_id = MDDUtil.get_run_id(job_name, job_start_timestamp)
+        log_timestamp = datetime.datetime.utcnow()
+
+        data = [
+            (
+                job_run_id,
+                job_name,
+                job_start_timestamp,
+                job_end_timestamp,
+                job_status,
+                error_message,
+                log_timestamp
+            )
+        ]
+
+        spark_session = SparkSession.builder.getOrCreate()
+        df = spark_session.createDataFrame(
+            data,
+            "job_run_id string, job_name string, job_start_timestamp timestamp, job_end_timestamp timestamp, job_status string, error_message string, log_timestamp timestamp",
+        )
+
+        dt = DeltaTable.forName(spark_session, table_full_name)
+        (
+            dt.alias("t")
+            .merge(
+                df.alias("s"),
+                f"s.job_run_id = t.job_run_id and s.job_name = t.job_name and t.job_name = '{job_name}'",
+            )
+            .whenNotMatchedInsertAll()
+            .whenMatchedUpdate(
+                set={
+                    "job_end_timestamp": "s.job_end_timestamp",
+                    "job_status": "s.job_status",
+                    "error_message": "s.error_message",
+                    "log_timestamp": "s.log_timestamp"
+                }
+            )
+            .execute()
+        )
+
+    @staticmethod
+    def etl_job_tasks_update(
+        job_name: str,
+        job_start_timestamp: datetime.datetime,
+        task_name: str,
+        task_start_timestamp: datetime.datetime,
+        task_end_timestamp: datetime.datetime,
+        task_status: str,
+        error_message: str
+    ):
+        table_full_name = DeltaTableUtil.get_table_full_name("mdd.etl_job_tasks")
+        task_run_id = MDDUtil.get_run_id(task_name, task_start_timestamp)
+        job_run_id = MDDUtil.get_run_id(job_name, job_start_timestamp)
+        log_timestamp = datetime.datetime.utcnow()
+
+        data = [
+            (
+                task_run_id,
+                task_name,
+                task_start_timestamp,
+                task_end_timestamp,
+                task_status,
+                job_run_id,
+                error_message,
+                log_timestamp
+            )
+        ]
+        spark_session = SparkSession.builder.getOrCreate()
+        df = spark_session.createDataFrame(
+            data,
+            "task_run_id string, task_name string, task_start_timestamp timestamp, task_end_timestamp timestamp, task_status string, job_run_id string, error_message string, log_timestamp timestamp",
+        )
+        dt = DeltaTable.forName(spark_session, table_full_name)
+        (
+            dt.alias("t")
+            .merge(
+                df.alias("s"),
+                f"s.task_run_id = t.task_run_id and s.task_name = t.task_name and t.task_name = '{task_name}'",
+            )
+            .whenNotMatchedInsertAll()
+            .whenMatchedUpdate(
+                set={
+                    "task_end_timestamp": "s.task_end_timestamp",
+                    "task_status": "s.task_status",
+                    "error_message": "s.error_message",
+                    "log_timestamp": "s.log_timestamp"
+                }
+            )
+            .execute()
+        )
+
+    @staticmethod
+    def etl_job_files_update(
+        file_run_id,
+        file_name,
+        file_timestamp,
+        file_date,
+        file_path,
+        table_name,
+        data_sync_mode,
+        data_write_mode,
+        rows_read,
+        rows_onboarded,
+        task_run_id,
+        job_run_id
+    ):
+        table_full_name = DeltaTableUtil.get_table_full_name("mdd.etl_job_tasks")
+        log_timestamp = datetime.datetime.utcnow()
+
+        data = [
+            (
+                file_run_id,
+                file_name,
+                file_timestamp,
+                file_date,
+                file_path,
+                file_rows,
+                table_name,
+                data_sync_mode,
+                data_write_mode,
+                rows_read,
+                rows_onboarded,
+                task_run_id,
+                job_run_id,
+                log_timestamp
+            )
+        ]
+        spark_session = SparkSession.builder.getOrCreate()
+        df = spark_session.createDataFrame(
+            data,
+            "file_run_id string, file_name string, file_timestamp timestamp, file_date string, file_path string, table_name string, data_sync_mode string, data_write_mode string, rows_read long, rows_onboarded long, task_run_id string , job_run_id string , log_timestamp timestamp",
+        )
+        df.write.mode("append").saveAsTable(table_full_name)
+        
+    @staticmethod
+    def etl_job_tables_update(    
+    table_run_id              
+    ,table_name               
+    ,data_sync_mode  
+    ,data_write_mode         
+    ,source_table_name        
+    ,source_table_timestamp   
+    ,source_table_cfversion   
+    ,rows_read                
+    ,batches                  
+    ,batch                    
+    ,rows_in_batch            
+    ,rows_inserted            
+    ,rows_updated             
+    ,rows_deleted             
+    ,read_start_timestamp     
+    ,read_end_timestamp       
+    ,transform_start_timestamp
+    ,transform_end_timestamp  
+    ,write_start_timestamp    
+    ,write_end_timestamp      
+    ,task_run_id              
+    ,job_run_id               
+    ,log_timestamp            
+            
+    ):
+        table_full_name = DeltaTableUtil.get_table_full_name("mdd.etl_job_tables")
+        data = [(    
+            table_run_id              
+            ,table_name               
+            ,data_sync_mode  
+            ,data_write_mode         
+            ,source_table_name        
+            ,source_table_timestamp   
+            ,source_table_cfversion   
+            ,rows_read                
+            ,batches                  
+            ,batch                    
+            ,rows_in_batch            
+            ,rows_inserted            
+            ,rows_updated             
+            ,rows_deleted             
+            ,read_start_timestamp     
+            ,read_end_timestamp       
+            ,transform_start_timestamp
+            ,transform_end_timestamp  
+            ,write_start_timestamp    
+            ,write_end_timestamp      
+            ,task_run_id              
+            ,job_run_id               
+            ,log_timestamp            
+            
+        )]
+
+        schema = """
+        table_run_id                   string
+        ,table_name                    string
+        ,data_sync_mode                string
+        ,data_write_mode               string
+        ,source_table_name             string
+        ,source_table_timestamp        timestamp
+        ,source_table_cfversion        long
+        ,rows_read                     long
+        ,batches                       long
+        ,batch                         string
+        ,rows_in_batch                 long
+        ,rows_inserted                 long
+        ,rows_updated                  long
+        ,rows_deleted                  long
+        ,read_start_timestamp          timestamp
+        ,read_end_timestamp            timestamp
+        ,transform_start_timestamp     timestamp
+        ,transform_end_timestamp       timestamp
+        ,write_start_timestamp         timestamp
+        ,write_end_timestamp           timestamp
+        ,task_run_id                   string
+        ,job_run_id                    string
+        ,log_timestamp                 timestamp
+        """
+
+        spark_session = SparkSession.builder.getOrCreate()
+
+        df = spark_session.createDataFrame(data, schema)
+        df.write.mode("append").saveAsTable(table_full_name)

@@ -44,7 +44,7 @@ writer:
     sink_projected_script: select * from vw_temp_source_data_uuid
     sink_write_mode: update #append, update (complete is not supported)
     sink_primarykey: combine_datetime, primary_card_number, added_card_number # mandatory for update mode
-    sink_deduplication_columns: _source_name desc, account_code
+    sink_deduplication_expr: _source_name desc, account_code
     sink_watermark_column: null
     sink_update_changes_only: true
     sink_write_options:

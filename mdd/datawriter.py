@@ -1,7 +1,7 @@
 import inspect
 import logging
-import uuid
 import shutil
+from typing import Callable, Optional
 from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -14,17 +14,26 @@ from mdd.utils import DecoratorUtil, FunctionUtil, DeltaTableUtil
 class DeltaTableWriter:
     logger: logging.Logger
     def __init__(
-        self, spark: SparkSession, config: dict, debug: bool = False
+        self,
+        spark: SparkSession,
+        config: dict,
+        df: DataFrame,
+        debug: bool = False,
+        sync_mode: str = None,
+        func_transform: Optional[Callable[[DataFrame], DataFrame]] = None
     ):
         self.spark = spark
+        self.df = df
         self.debug = debug
+        self.sync_mode = sync_mode
+        self.func_transform = func_transform
 
         self.sink_name = config['sink_name']
         self.sink_full_name = DeltaTableUtil.get_table_full_name(self.sink_name )
         self.sink_projected_script = config["sink_projected_script"]
         self.sink_write_mode = config["sink_write_mode"]
         self.sink_primarykey = config["sink_primarykey"]
-        self.sink_deduplication_columns = config["sink_deduplication_columns"]
+        self.sink_deduplication_expr = config["sink_deduplication_expr"]
         self.sink_watermark_column = config["sink_watermark_column"]
         self.sink_update_changes_only = config["sink_update_changes_only"]
         self.sink_write_options = config["sink_write_options"]
@@ -210,24 +219,40 @@ class DeltaTableWriter:
             raise
 
     @DecoratorUtil.log_function()
-    def process_microbatch(self, batch_df, batch_id):
+    def _transform(self, df: DataFrame) -> DataFrame:
+        """
+        Apply the transformation logic to the input DataFrame.
+        """
+        return df
+
+    @DecoratorUtil.log_function()
+    def _process_microbatch(self, batch_df, batch_id):
+        from mdd.utils import DeltaTableUtil
         self.logger.info(f"Processing batch {batch_id}")
 
-        from mdd.utils import DeltaTableUtil
+        df = batch_df
+        if self.func_transform:
+            self.logger.info(f"Transforming data")
+            df = self.func_transform(df)
+
+            # check if the following system columns are included
+            system_columns = ["_source_name", "_source_timestamp", "_record_deleted"]
+            if not DeltaTableUtil.columns_exist(df, system_columns):
+                raise ValueError(f"Missing system columns in the transformed data: {system_columns}")
 
         if self.sink_write_mode == "update":
             # verify columns existence
-            DeltaTableUtil.validate_columns(self.spark, batch_df, self.sink_name)
+            DeltaTableUtil.validate_columns(self.spark, df, self.sink_name)
 
             # dedupicate
-            df = DeltaTableUtil.deduplicate(batch_df, self.sink_primarykey, self.sink_deduplication_columns)
+            df = DeltaTableUtil.deduplicate(df, self.sink_primarykey, self.sink_deduplication_expr)
 
             # update and insert
             self._upsert_to_delta(df, batch_id)
 
         else:
             # match the columns
-            df = DeltaTableUtil.match_columns(self.spark, batch_df, self.sink_name)
+            df = DeltaTableUtil.match_columns(self.spark, df, self.sink_name)
 
             # append
             df.write.format("delta").mode("append").saveAsTable(self.sink_full_name)
@@ -244,8 +269,9 @@ class DeltaTableWriter:
         if self.sink_write_postscript:
             self.spark.sql(self.sink_write_postscript)
 
+
     @DecoratorUtil.log_function()
-    def write_stream(self, df: DataFrame, sync_mode: str = None):
+    def write_stream(self):
         """
         Configure and start the streaming write based on the provided settings.
         """
@@ -256,7 +282,7 @@ class DeltaTableWriter:
             self._execute_prescript()
 
             # Apply projection script
-            df = self._projected(df, self.sink_projected_script)
+            df = self._projected(self.df, self.sink_projected_script)
 
             # Add system columns early
             if "_metadata" in df.columns:
@@ -282,15 +308,11 @@ class DeltaTableWriter:
             checkpointlocation_path = DeltaTableUtil.get_checkpointlocation_path(
                 self.sink_name,
                 checkpointlocation,
-                sync_mode)
+                self.sync_mode)
             if self.debug:
-                    self.logger.debug(f"Checkpoint location: {checkpointlocation_path} for sync mode '{sync_mode}'")
+                    self.logger.debug(f"Checkpoint location: {checkpointlocation_path} for sync mode '{self.sync_mode}'")
 
-            # delete the checkpoint location if the mode is full or backfill
-            if sync_mode in ["full", "backfill"]:
-                shutil.rmtree(checkpointlocation_path, ignore_errors=True)
-                if self.debug:
-                    self.logger.debug(f"Deleted checkpoint location for sync mode '{sync_mode}'")
+            
 
             self.sink_write_options[location_key] = checkpointlocation_path
 
@@ -301,7 +323,7 @@ class DeltaTableWriter:
                 .outputMode("append")
                 .options(**self.sink_write_options)
                 .trigger(**self._get_trigger_args())
-                .foreachBatch(self.process_microbatch)
+                .foreachBatch(self._process_microbatch)
                 .start()
             )
 

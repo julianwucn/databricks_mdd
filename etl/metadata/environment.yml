@@ -1,5 +1,5 @@
 catalog_default: lakehouse
-root_path_autoloader: /Volumes/lakehouse/mdd/autoloader
+root_path_state: /Volumes/lakehouse/mdd/state
 root_path_data: /Volumes/lakehouse/mdd/data
 root_path_log: /Volumes/lakehouse/mdd/log
 log_metadata: log.yml
